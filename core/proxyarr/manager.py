@@ -49,7 +49,7 @@ class Manager:
     def start(self) -> None:
         self.settings.run_dir.mkdir(parents=True, exist_ok=True)
         self._prepare_host()
-        self.reconcile()
+        self.reconcile(wait_for_probes=True)
         self._supervisor = threading.Thread(target=self._supervise, daemon=True)
         self._supervisor.start()
 
@@ -103,7 +103,20 @@ class Manager:
                 tunnel.restart_probe()
         log.info("probe urls set to %s", env["PROBE_URLS"])
 
-    def reconcile(self) -> None:
+    def _wait_for_probe_verdicts(self, timeout: float = 30.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pending = []
+            for name, tunnel in self.tunnels.items():
+                verdict = tunnel.probe_status()
+                if verdict is None or verdict.startswith("down: starting up"):
+                    pending.append(name)
+            if not pending:
+                return
+            time.sleep(0.25)
+        log.warning("probe verdict timeout; continuing with pending probes: %s", ", ".join(pending))
+
+    def reconcile(self, wait_for_probes: bool = False) -> None:
         with self._lock:
             peers = self.store.list()
             desired = {peer.name: peer for peer in peers if peer.enabled}
@@ -129,6 +142,8 @@ class Manager:
                 self._fingerprints[name] = _fingerprint(peer.text)
                 self.failures.pop(name, None)
 
+            if wait_for_probes:
+                self._wait_for_probe_verdicts()
             self._apply_haproxy(peers)
 
     def _teardown(self, name: str) -> None:

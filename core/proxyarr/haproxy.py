@@ -21,6 +21,9 @@ log = logging.getLogger("proxyarr.haproxy")
 _TEMPLATE = """\
 global
     log stdout format raw local0 info
+    user haproxy
+    group haproxy
+    chroot /var/empty
     stats socket {sock} mode 660 level admin
     stats timeout 30s
 

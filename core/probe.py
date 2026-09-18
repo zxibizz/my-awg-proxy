@@ -102,8 +102,7 @@ def probe() -> tuple[bool, str]:
 
 
 def probe_loop() -> None:
-    # Staggered per tunnel so the pool does not hammer the target in lockstep.
-    time.sleep(START_DELAY)
+    first = True
     while True:
         healthy, reason = probe()
         with _lock:
@@ -111,7 +110,9 @@ def probe_loop() -> None:
             _state.update(healthy=healthy, reason=reason, checked_at=time.time())
         if changed:
             log(f"{'healthy' if healthy else 'UNHEALTHY'}: {reason}")
-        time.sleep(PROBE_INTERVAL)
+        # The first verdict should be available immediately; stagger later cycles.
+        time.sleep(START_DELAY if first else PROBE_INTERVAL)
+        first = False
 
 
 class Handler(BaseHTTPRequestHandler):
