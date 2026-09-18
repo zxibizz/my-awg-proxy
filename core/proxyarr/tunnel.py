@@ -88,6 +88,23 @@ class Tunnel:
             stdin=subprocess.DEVNULL,
         )
 
+    def _add_netns(self) -> None:
+        Path("/run/netns").mkdir(parents=True, exist_ok=True)
+        last_error = None
+        for attempt in range(5):
+            try:
+                sh.run("mount", "--bind", "/run/netns", "/run/netns", check=False)
+                sh.run("mount", "--make-shared", "/run/netns")
+                sh.run("ip", "netns", "add", self.netns)
+                return
+            except sh.CommandError as exc:
+                last_error = exc
+                sh.quiet("ip", "netns", "del", self.netns)
+                if attempt < 4:
+                    time.sleep(1)
+            assert last_error is not None
+        raise last_error
+
     def _probe_env(self, immediate: bool = False) -> dict[str, str]:
         env = dict(self.probe_env)
         env["LISTEN_PORT"] = str(PROBE_PORT)
@@ -112,7 +129,7 @@ class Tunnel:
             "".join(f"nameserver {ns}\n" for ns in nameservers)
         )
 
-        sh.ip("netns", "add", self.netns)
+        self._add_netns()
         sh.ip("-n", self.netns, "link", "set", "lo", "up")
 
         sh.ip("link", "add", self.host_if, "type", "veth", "peer", "name", self.ns_if)
