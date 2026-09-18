@@ -92,11 +92,9 @@ class Tunnel:
 
     def _add_netns(self) -> None:
         self.netns_holder = subprocess.Popen(
-            ["unshare", "--mount", "--net", "--fork", "--pid", "--mount-proc",
-             "sleep", "infinity"],
+            ["unshare", "--mount", "--net", "--fork", "--pid", "sleep", "infinity"],
             stdin=subprocess.DEVNULL,
         )
-        sh.netns_exec_pid(self.netns_holder.pid, "mount", "--make-rprivate", "/")
 
     def _probe_env(self, immediate: bool = False) -> dict[str, str]:
         env = dict(self.probe_env)
