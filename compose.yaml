@@ -12,6 +12,13 @@ x-socks: &socks
   devices:
     - /dev/net/tun:/dev/net/tun
   restart: unless-stopped
+  environment:
+    # amneziawg-go: silent | error | verbose. Verbose logs every handshake and
+    # keepalive, which is what makes a blackout diagnosable.
+    LOG_LEVEL: ${WG_LOG_LEVEL:-error}
+    # Without this the published port only answers on loopback: replies to LAN
+    # clients would follow the default route into the tunnel.
+    LAN_SUBNETS: ${LAN_SUBNETS:-10.99.0.0/16}
   healthcheck:
     # Exercises the whole path: socks handshake, in-tunnel DNS, then egress.
     test: ["CMD", "curl", "-sf", "-m", "5", "-o", "/dev/null",

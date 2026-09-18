@@ -7,6 +7,8 @@ set -eu
 CONF=${WG_CONFIG:-/config/wg.conf}
 IFACE=awg0
 PORT=${SOCKS_PORT:-1080}
+# Subnets that must stay reachable off-tunnel, comma or space separated.
+LAN_SUBNETS=${LAN_SUBNETS:-}
 
 [ -r "$CONF" ] || { echo "no readable config at $CONF" >&2; exit 1; }
 umask 077
@@ -78,6 +80,13 @@ ip link set dev "$IFACE" mtu "$MTU" up
 for ep in $EP_IPS; do
     ip route add "$ep/32" via "$GW" dev "$DEV"
 done
+
+# Docker's DNAT keeps the caller's source address, so a reply to a LAN client
+# would otherwise follow the default route into the tunnel and never arrive.
+for subnet in $(printf '%s' "$LAN_SUBNETS" | tr ',' ' '); do
+    ip route add "$subnet" via "$GW" dev "$DEV"
+done
+
 ip route replace default dev "$IFACE"
 if [ "$HAS_V6" = yes ]; then
     ip -6 route replace default dev "$IFACE" || true
