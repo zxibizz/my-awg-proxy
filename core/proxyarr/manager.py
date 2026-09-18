@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import time
+from pathlib import Path
 
 from . import sh
 from .config import Settings
@@ -62,6 +63,22 @@ class Manager:
             self.tunnels.clear()
 
     def _prepare_host(self) -> None:
+        # iproute2 needs /run/netns to already be a shared mountpoint; creating it
+        # per tunnel would stack bind mounts until the handles became unremovable.
+        netns_dir = Path("/run/netns")
+        netns_dir.mkdir(parents=True, exist_ok=True)
+        if not netns_dir.is_mount():
+            sh.run("mount", "--bind", str(netns_dir), str(netns_dir), check=False)
+        sh.run("mount", "--make-shared", str(netns_dir), check=False)
+
+        # Left over from a previous run if the container was restarted in place.
+        listed = sh.run("ip", "-o", "netns", "list", check=False)
+        for line in listed.stdout.splitlines():
+            name = line.split()[0] if line.split() else ""
+            if _NETNS_RE.match(name):
+                log.warning("removing stale netns %s", name)
+                sh.quiet("ip", "netns", "del", name)
+
         route = sh.run("ip", "-4", "route", "show", "default", check=False)
         parts = route.stdout.split()
         uplink = parts[parts.index("dev") + 1] if "dev" in parts else "eth0"

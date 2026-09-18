@@ -40,12 +40,3 @@ def ip(*argv: str, check: bool = True) -> subprocess.CompletedProcess:
 
 def netns_exec(netns: str, *argv: str, check: bool = True, timeout: float = 30):
     return run("ip", "netns", "exec", netns, *argv, check=check, timeout=timeout)
-
-
-def netns_exec_pid(pid: int, *argv: str, check: bool = True, timeout: float = 30):
-    return run("nsenter", "-t", str(pid), "-m", "-n", "--", *argv,
-               check=check, timeout=timeout)
-
-
-def ip_pid(pid: int, *argv: str, check: bool = True):
-    return netns_exec_pid(pid, "ip", *argv, check=check)
