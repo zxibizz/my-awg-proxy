@@ -1,62 +1,57 @@
+# One container per peer, each with its own socks5 port. A container is already
+# a network namespace, so unlike the pooled stack this needs no SYS_ADMIN, no
+# apparmor exception, no veth pairs and no NAT rules -- only NET_ADMIN and tun.
+#
+# Tunnels fail independently, so pointing different consumers at different ports
+# keeps one bad exit from taking everything down.
+
+x-socks: &socks
+  build: ./socks
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  restart: unless-stopped
+  environment:
+    # amneziawg-go: silent | error | verbose. Verbose logs every handshake and
+    # keepalive, which is what makes a blackout diagnosable.
+    LOG_LEVEL: ${WG_LOG_LEVEL:-error}
+    # Without this the published port only answers on loopback: replies to LAN
+    # clients would follow the default route into the tunnel.
+    LAN_SUBNETS: ${LAN_SUBNETS:-10.99.0.0/16}
+  healthcheck:
+    # Exercises the whole path: socks handshake, in-tunnel DNS, then egress.
+    test: ["CMD", "curl", "-sf", "-m", "5", "-o", "/dev/null",
+           "--socks5-hostname", "127.0.0.1:1080",
+           "https://www.google.com/generate_204"]
+    interval: 15s
+    timeout: 10s
+    retries: 3
+    start_period: 20s
+
 services:
-  core:
-    build: ./core
-    container_name: proxyarr-core
-    cap_add:
-      # NET_ADMIN configures the links; SYS_ADMIN is what lets the container
-      # create its own network namespaces (docker's seccomp profile only
-      # permits unshare/setns when it is present).
-      - NET_ADMIN
-      - SYS_ADMIN
-    security_opt:
-      # docker-default denies mount outright, which blocks `ip netns add` even
-      # with SYS_ADMIN. Only bites on AppArmor hosts, so it is invisible on
-      # Docker Desktop and fails on Ubuntu.
-      - apparmor=unconfined
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    sysctls:
-      # Tunnel handshakes are forwarded from each netns out through eth0.
-      - net.ipv4.ip_forward=1
+  de:
+    <<: *socks
+    container_name: proxyarr-de
     volumes:
-      - ./data:/data
-      # Imported once, only while ./data/peers is still empty.
-      - ./wg_confs:/seed:ro
-    environment:
-      PROXYARR_TOKEN: ${PROXYARR_TOKEN:?set PROXYARR_TOKEN in .env}
-      # tracker.php is the endpoint that gets throttled, but it answers 403 without
-      # a session, so it only belongs here once PROBE_COOKIE is set.
-      PROBE_URLS: https://google.com
-      # all: one failing URL trips failover. any: every URL must fail.
-      PROBE_MODE: all
-      PROBE_INTERVAL: "60"
-      # Consecutive failed cycles before a tunnel leaves the pool, and how soon
-      # a failing probe re-checks instead of waiting out PROBE_INTERVAL.
-      PROBE_FAILURE_THRESHOLD: "2"
-      PROBE_RECHECK_INTERVAL: "10"
-      PROBE_BAD_STATUS: "403,429,503"
-      # Set once you have captured what a throttled response actually looks like.
-      PROBE_BAD_TEXT: ""
-      PROBE_COOKIE: ""
+      - ./wg_confs/DE.conf:/config/wg.conf:ro
     ports:
-      # Bound to loopback: the proxy has no auth.
-      - "127.0.0.1:1080:1080"
-    restart: unless-stopped
+      # No auth on the proxy: anything wider than loopback needs a source-IP
+      # firewall rule (docker DNAT bypasses INPUT, so use the DOCKER-USER chain).
+      - "1081:1080"
 
-  web:
-    build: ./web
-    container_name: proxyarr-web
-    environment:
-      CORE_URL: http://core:8080
-      PROXYARR_TOKEN: ${PROXYARR_TOKEN:?set PROXYARR_TOKEN in .env}
+  nl:
+    <<: *socks
+    container_name: proxyarr-nl
+    volumes:
+      - ./wg_confs/NL.conf:/config/wg.conf:ro
     ports:
-      # Bound to loopback: the console has no auth.
-      - "127.0.0.1:8088:8000"
-    depends_on: [core]
-    restart: unless-stopped
+      - "1082:1080"
 
-networks:
-  default:
-    ipam:
-      config:
-        - subnet: 172.31.250.0/24
+  se:
+    <<: *socks
+    container_name: proxyarr-se
+    volumes:
+      - ./wg_confs/SE.conf:/config/wg.conf:ro
+    ports:
+      - "1083:1080"
