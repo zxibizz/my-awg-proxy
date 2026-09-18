@@ -62,17 +62,6 @@ class Manager:
             self.tunnels.clear()
 
     def _prepare_host(self) -> None:
-        # Left over from a previous run if the container was restarted in place.
-        listed = sh.run("ip", "-o", "netns", "list", check=False)
-        for line in listed.stdout.splitlines():
-            name = line.split()[0] if line.split() else ""
-            if _NETNS_RE.match(name):
-                log.warning("removing stale netns %s", name)
-                sh.quiet("ip", "netns", "del", name)
-                netns_path = Path("/run/netns") / name
-                if netns_path.exists() or netns_path.is_symlink():
-                    netns_path.unlink(missing_ok=True)
-
         route = sh.run("ip", "-4", "route", "show", "default", check=False)
         parts = route.stdout.split()
         uplink = parts[parts.index("dev") + 1] if "dev" in parts else "eth0"

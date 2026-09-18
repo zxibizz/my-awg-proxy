@@ -48,6 +48,7 @@ class Tunnel:
         self.started_at = 0.0
         self.error: str | None = None
         self.procs: dict[str, subprocess.Popen] = {}
+        self.netns_holder: subprocess.Popen | None = None
 
     # ---------------------------------------------------------------- helpers
 
@@ -73,7 +74,8 @@ class Tunnel:
     def _wait_for_link(self) -> None:
         deadline = time.monotonic() + _IFACE_TIMEOUT
         while time.monotonic() < deadline:
-            if sh.ip("-n", self.netns, "link", "show", self.wg_if, check=False).returncode == 0:
+            if sh.ip_pid(self.netns_holder.pid, "link", "show", self.wg_if,
+                         check=False).returncode == 0:
                 return
             if (proc := self.procs.get("awg")) is not None and proc.poll() is not None:
                 raise TunnelError(f"amneziawg-go exited with {proc.returncode}")
@@ -83,27 +85,18 @@ class Tunnel:
     def _spawn(self, key: str, argv: list[str], env: dict[str, str] | None = None) -> None:
         full_env = {**os.environ, **(env or {})}
         self.procs[key] = subprocess.Popen(
-            ["ip", "netns", "exec", self.netns, *argv],
+            ["nsenter", "-t", str(self.netns_holder.pid), "-m", "-n", "--", *argv],
             env=full_env,
             stdin=subprocess.DEVNULL,
         )
 
     def _add_netns(self) -> None:
-        Path("/run/netns").mkdir(parents=True, exist_ok=True)
-        last_error = None
-        for attempt in range(5):
-            try:
-                sh.run("mount", "--bind", "/run/netns", "/run/netns", check=False)
-                sh.run("mount", "--make-shared", "/run/netns")
-                sh.run("ip", "netns", "add", self.netns)
-                return
-            except sh.CommandError as exc:
-                last_error = exc
-                sh.quiet("ip", "netns", "del", self.netns)
-                if attempt < 4:
-                    time.sleep(1)
-            assert last_error is not None
-        raise last_error
+        self.netns_holder = subprocess.Popen(
+            ["unshare", "--mount", "--net", "--fork", "--pid", "--mount-proc",
+             "sleep", "infinity"],
+            stdin=subprocess.DEVNULL,
+        )
+        sh.netns_exec_pid(self.netns_holder.pid, "mount", "--make-rprivate", "/")
 
     def _probe_env(self, immediate: bool = False) -> dict[str, str]:
         env = dict(self.probe_env)
@@ -130,22 +123,28 @@ class Tunnel:
         )
 
         self._add_netns()
-        sh.ip("-n", self.netns, "link", "set", "lo", "up")
+        resolver_mount = sh.netns_exec_pid(
+            self.netns_holder.pid, "mount", "--bind",
+            str(self.netns_etc / "resolv.conf"), "/etc/resolv.conf", check=False
+        )
+        if resolver_mount.returncode != 0:
+            log.warning("[%s] using the container resolver in its mount namespace", self.name)
+        sh.ip_pid(self.netns_holder.pid, "link", "set", "lo", "up")
 
         sh.ip("link", "add", self.host_if, "type", "veth", "peer", "name", self.ns_if)
-        sh.ip("link", "set", self.ns_if, "netns", self.netns)
+        sh.ip("link", "set", self.ns_if, "netns", str(self.netns_holder.pid))
         sh.ip("addr", "add", f"{self.host_ip}/30", "dev", self.host_if)
         sh.ip("link", "set", self.host_if, "up")
-        sh.ip("-n", self.netns, "addr", "add", f"{self.ns_ip}/30", "dev", self.ns_if)
-        sh.ip("-n", self.netns, "link", "set", self.ns_if, "up")
+        sh.ip_pid(self.netns_holder.pid, "addr", "add", f"{self.ns_ip}/30", "dev", self.ns_if)
+        sh.ip_pid(self.netns_holder.pid, "link", "set", self.ns_if, "up")
 
         self._spawn("awg", ["amneziawg-go", "-f", self.wg_if])
         self._wait_for_link()
 
         for address in self.peer.config.addresses:
             family = "-6" if ":" in address else "-4"
-            sh.ip("-n", self.netns, family, "addr", "add", address, "dev", self.wg_if)
-        sh.ip("-n", self.netns, "link", "set", "dev", self.wg_if,
+            sh.ip_pid(self.netns_holder.pid, family, "addr", "add", address, "dev", self.wg_if)
+        sh.ip_pid(self.netns_holder.pid, "link", "set", "dev", self.wg_if,
               "mtu", str(self.peer.config.mtu), "up")
 
         # Pin the peer endpoint to the veth before the tunnel claims the
@@ -153,16 +152,17 @@ class Tunnel:
         for addr in endpoints:
             if ":" in addr:
                 continue
-            sh.ip("-n", self.netns, "route", "add", f"{addr}/32", "via", self.host_ip)
-        sh.ip("-n", self.netns, "route", "replace", "default", "dev", self.wg_if)
+            sh.ip_pid(self.netns_holder.pid, "route", "add", f"{addr}/32", "via", self.host_ip)
+        sh.ip_pid(self.netns_holder.pid, "route", "replace", "default", "dev", self.wg_if)
         if self.peer.config.has_ipv6:
-            sh.ip("-n", self.netns, "-6", "route", "replace", "default",
+            sh.ip_pid(self.netns_holder.pid, "-6", "route", "replace", "default",
                   "dev", self.wg_if, check=False)
 
         # Loading the peer is deliberately last: amneziawg-go starts handshaking
         # the moment it has one, and a handshake sent before the endpoint route
         # exists fails as unreachable and costs a back-off window.
-        sh.netns_exec(self.netns, "awg", "setconf", self.wg_if, str(self.wg_conf_path))
+        sh.netns_exec_pid(self.netns_holder.pid, "awg", "setconf", self.wg_if,
+                  str(self.wg_conf_path))
 
         self._spawn("socks", ["microsocks", "-i", "0.0.0.0", "-p", str(SOCKS_PORT), "-q"])
         self._spawn("probe", ["python3", str(self.settings.probe_script)], self._probe_env())
@@ -187,14 +187,14 @@ class Tunnel:
                 proc.wait(timeout=5)
         self.procs.clear()
 
-        sh.quiet("ip", "netns", "del", self.netns)
-        # ip-netns cannot unlink a handle whose bind mount was already invalidated.
-        netns_path = Path("/run/netns") / self.netns
-        if netns_path.exists() or netns_path.is_symlink():
+        if self.netns_holder is not None:
+            self.netns_holder.terminate()
             try:
-                netns_path.unlink()
-            except OSError as exc:
-                log.warning("[%s] could not remove namespace handle: %s", self.name, exc)
+                self.netns_holder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.netns_holder.kill()
+                self.netns_holder.wait(timeout=5)
+            self.netns_holder = None
         sh.quiet("ip", "link", "del", self.host_if)
         shutil.rmtree(self.netns_etc, ignore_errors=True)
         self.wg_conf_path.unlink(missing_ok=True)
@@ -230,8 +230,10 @@ class Tunnel:
 
     def wg_stats(self) -> dict:
         """Latest handshake and byte counters from `awg show <iface> dump`."""
-        proc = sh.netns_exec(self.netns, "awg", "show", self.wg_if, "dump",
-                             check=False, timeout=10)
+        if self.netns_holder is None:
+            return {"handshake_age": None, "rx_bytes": 0, "tx_bytes": 0, "endpoint": None}
+        proc = sh.netns_exec_pid(self.netns_holder.pid, "awg", "show", self.wg_if, "dump",
+                                 check=False, timeout=10)
         stats = {"handshake_age": None, "rx_bytes": 0, "tx_bytes": 0, "endpoint": None}
         if proc.returncode != 0:
             return stats
@@ -264,8 +266,10 @@ class Tunnel:
         return body.decode("utf-8", "replace").strip() or None
 
     def exit_ip(self, url: str, timeout: float = 10) -> str:
-        proc = sh.netns_exec(
-            self.netns, "curl", "-sS", "--max-time", str(int(timeout)), url,
+        if self.netns_holder is None:
+            raise TunnelError(f"{self.name} is not running")
+        proc = sh.netns_exec_pid(
+            self.netns_holder.pid, "curl", "-sS", "--max-time", str(int(timeout)), url,
             check=False, timeout=timeout + 5,
         )
         if proc.returncode != 0:
