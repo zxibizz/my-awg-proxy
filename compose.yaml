@@ -1,0 +1,117 @@
+x-awg: &awg
+  build: ./awg
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    # awg-quick's fwmark policy routing drops reply packets without this.
+    - net.ipv4.conf.all.src_valid_mark=1
+  restart: unless-stopped
+
+x-socks: &socks
+  image: serjs/go-socks5-proxy:latest
+  environment:
+    PROXY_PORT: 1080
+    # Defaults to true in this image and exits on boot without credentials.
+    REQUIRE_AUTH: "false"
+  restart: unless-stopped
+
+x-probe: &probe
+  image: python:3.12-alpine
+  command: ["python", "/probe.py"]
+  volumes:
+    - ./probe.py:/probe.py:ro
+  environment: &probe-env
+    # tracker.php is the endpoint that gets throttled, but it answers 403 without
+    # a session, so it only belongs here once PROBE_COOKIE is set.
+    PROBE_URLS: https://rutracker.org/forum/index.php
+    # all: one failing URL trips failover. any: every URL must fail.
+    PROBE_MODE: all
+    PROBE_INTERVAL: "60"
+    PROBE_BAD_STATUS: "403,429,503"
+    # Set once you have captured what a throttled response actually looks like.
+    PROBE_BAD_TEXT: ""
+    PROBE_COOKIE: ""
+  restart: unless-stopped
+
+services:
+  vpn1:
+    <<: *awg
+    container_name: wg-vpn1
+    volumes:
+      - ./wg_confs/NL.conf:/etc/amnezia/awg0.conf:ro
+
+  socks1:
+    <<: *socks
+    container_name: wg-socks1
+    network_mode: service:vpn1
+    depends_on: [vpn1]
+
+  probe1:
+    <<: *probe
+    container_name: wg-probe1
+    network_mode: service:vpn1
+    depends_on: [vpn1]
+    environment:
+      <<: *probe-env
+      START_DELAY: "0"
+
+  vpn2:
+    <<: *awg
+    container_name: wg-vpn2
+    volumes:
+      - ./wg_confs/DE.conf:/etc/amnezia/awg0.conf:ro
+
+  socks2:
+    <<: *socks
+    container_name: wg-socks2
+    network_mode: service:vpn2
+    depends_on: [vpn2]
+
+  probe2:
+    <<: *probe
+    container_name: wg-probe2
+    network_mode: service:vpn2
+    depends_on: [vpn2]
+    environment:
+      <<: *probe-env
+      START_DELAY: "20"
+
+  vpn3:
+    <<: *awg
+    container_name: wg-vpn3
+    volumes:
+      - ./wg_confs/SE.conf:/etc/amnezia/awg0.conf:ro
+
+  socks3:
+    <<: *socks
+    container_name: wg-socks3
+    network_mode: service:vpn3
+    depends_on: [vpn3]
+
+  probe3:
+    <<: *probe
+    container_name: wg-probe3
+    network_mode: service:vpn3
+    depends_on: [vpn3]
+    environment:
+      <<: *probe-env
+      START_DELAY: "40"
+
+  haproxy:
+    image: haproxy:3.0-alpine
+    container_name: wg-haproxy
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      # Bound to loopback: the proxy has no auth by default.
+      - "127.0.0.1:1080:1080"
+    depends_on: [vpn1, vpn2, vpn3]
+    restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
