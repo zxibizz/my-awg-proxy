@@ -33,6 +33,11 @@ PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "15"))
 # retries a blip benches an otherwise healthy tunnel for a whole interval.
 PROBE_RETRIES = int(os.environ.get("PROBE_RETRIES", "2"))
 PROBE_RETRY_DELAY = float(os.environ.get("PROBE_RETRY_DELAY", "3"))
+# Tunnel DNS gets slow under load, so a single bad cycle is usually a blip rather
+# than throttling. Only a repeat takes the tunnel out of the pool.
+PROBE_FAILURE_THRESHOLD = max(1, int(os.environ.get("PROBE_FAILURE_THRESHOLD", "2")))
+# After a failure, re-check soon instead of benching the tunnel for a full interval.
+PROBE_RECHECK_INTERVAL = float(os.environ.get("PROBE_RECHECK_INTERVAL", "10"))
 PROBE_BAD_STATUS = {
     int(code)
     for code in os.environ.get("PROBE_BAD_STATUS", "403,429,503").split(",")
@@ -103,15 +108,28 @@ def probe() -> tuple[bool, str]:
 
 def probe_loop() -> None:
     first = True
+    failures = 0
     while True:
-        healthy, reason = probe()
+        passed, reason = probe()
+        if passed:
+            failures = 0
+            healthy = True
+        else:
+            failures += 1
+            healthy = _state["healthy"] is True and failures < PROBE_FAILURE_THRESHOLD
+            if healthy:
+                reason = f"degraded {failures}/{PROBE_FAILURE_THRESHOLD}: {reason}"
         with _lock:
             changed = healthy != _state["healthy"]
             _state.update(healthy=healthy, reason=reason, checked_at=time.time())
         if changed:
             log(f"{'healthy' if healthy else 'UNHEALTHY'}: {reason}")
         # The first verdict should be available immediately; stagger later cycles.
-        time.sleep(START_DELAY if first else PROBE_INTERVAL)
+        if first:
+            delay = START_DELAY
+        else:
+            delay = PROBE_INTERVAL if passed else PROBE_RECHECK_INTERVAL
+        time.sleep(delay)
         first = False
 
 

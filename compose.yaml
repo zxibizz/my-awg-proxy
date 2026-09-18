@@ -30,6 +30,10 @@ services:
       # all: one failing URL trips failover. any: every URL must fail.
       PROBE_MODE: all
       PROBE_INTERVAL: "60"
+      # Consecutive failed cycles before a tunnel leaves the pool, and how soon
+      # a failing probe re-checks instead of waiting out PROBE_INTERVAL.
+      PROBE_FAILURE_THRESHOLD: "2"
+      PROBE_RECHECK_INTERVAL: "10"
       PROBE_BAD_STATUS: "403,429,503"
       # Set once you have captured what a throttled response actually looks like.
       PROBE_BAD_TEXT: ""
