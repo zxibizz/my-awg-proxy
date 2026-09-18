@@ -132,6 +132,24 @@ class Haproxy:
         except subprocess.TimeoutExpired:
             self.proc.kill()
 
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        """Move a server in or out of maintenance without waiting for a health check.
+
+        Health checks only notice a torn-down tunnel after `fall * inter`, which is
+        long enough to route real connections into a namespace that no longer exists.
+        """
+        if not self.running:
+            return
+        verb = "enable" if enabled else "disable"
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(3)
+                conn.connect(str(self.sock_path))
+                conn.sendall(f"{verb} server vpn_pool/{name}\n".encode())
+                conn.recv(4096)
+        except OSError as exc:
+            log.warning("could not %s server %s: %s", verb, name, exc)
+
     def server_states(self) -> dict[str, dict[str, str]]:
         """`show stat` for the pool backend, keyed by server name."""
         try:

@@ -196,6 +196,7 @@ class Manager:
         tunnel = self.tunnels.pop(name, None)
         self._fingerprints.pop(name, None)
         if tunnel is not None:
+            self.haproxy.set_enabled(name, False)
             tunnel.down()
 
     def _apply_haproxy(self, peers) -> None:
@@ -223,11 +224,13 @@ class Manager:
             if peer is None:
                 self._teardown(name)
                 return
+            self.haproxy.set_enabled(name, False)
             tunnel.down()
             tunnel.peer = peer
             tunnel.probe_env = self.effective_probe_env()
             try:
                 tunnel.up()
+                self.haproxy.set_enabled(name, True)
                 self.failures.pop(name, None)
             except Exception as exc:
                 log.error("[%s] restart failed: %s", name, exc)
