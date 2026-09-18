@@ -19,6 +19,7 @@ log = logging.getLogger("proxyarr.manager")
 
 MAX_TUNNELS = 250
 _NETNS_RE = re.compile(r"^pa\d+$")
+_NETNS_PROBE = "pa-selftest"
 # Grace period after bring-up before the handshake watchdog may fire.
 _HANDSHAKE_GRACE = 90.0
 
@@ -63,13 +64,7 @@ class Manager:
             self.tunnels.clear()
 
     def _prepare_host(self) -> None:
-        # iproute2 needs /run/netns to already be a shared mountpoint; creating it
-        # per tunnel would stack bind mounts until the handles became unremovable.
-        netns_dir = Path("/run/netns")
-        netns_dir.mkdir(parents=True, exist_ok=True)
-        if not netns_dir.is_mount():
-            sh.run("mount", "--bind", str(netns_dir), str(netns_dir), check=False)
-        sh.run("mount", "--make-shared", str(netns_dir), check=False)
+        self._prepare_netns_dir()
 
         # Left over from a previous run if the container was restarted in place.
         listed = sh.run("ip", "-o", "netns", "list", check=False)
@@ -87,6 +82,48 @@ class Manager:
         rule = ["POSTROUTING", "-s", "169.254.0.0/16", "-o", uplink, "-j", "MASQUERADE"]
         if sh.run("iptables", "-t", "nat", "-C", *rule, check=False).returncode != 0:
             sh.run("iptables", "-t", "nat", "-A", *rule, check=False)
+
+    def _netns_works(self) -> bool:
+        """Smoke-test the real operation rather than trusting the mount state."""
+        sh.quiet("ip", "netns", "del", _NETNS_PROBE)
+        probe = sh.run("ip", "netns", "add", _NETNS_PROBE, check=False)
+        sh.quiet("ip", "netns", "del", _NETNS_PROBE)
+        if probe.returncode == 0:
+            return True
+        log.debug("netns smoke test failed: %s", probe.stderr.strip())
+        return False
+
+    def _prepare_netns_dir(self) -> None:
+        """Make /run/netns a shared mountpoint, which `ip netns add` requires.
+
+        Doing this once is deliberate: repeating the bind per tunnel stacks
+        mounts until the namespace handles can no longer be removed.
+        """
+        netns_dir = Path("/run/netns")
+        netns_dir.mkdir(parents=True, exist_ok=True)
+        if self._netns_works():
+            return
+
+        for label, setup in (
+            ("bind", ("mount", "--bind", str(netns_dir), str(netns_dir))),
+            ("tmpfs", ("mount", "-t", "tmpfs", "tmpfs", str(netns_dir))),
+        ):
+            mounted = sh.run(*setup, check=False)
+            if mounted.returncode != 0:
+                log.warning("netns dir %s mount failed: %s", label, mounted.stderr.strip())
+                continue
+            shared = sh.run("mount", "--make-shared", str(netns_dir), check=False)
+            if shared.returncode != 0:
+                log.warning("netns dir %s make-shared failed: %s", label, shared.stderr.strip())
+            if self._netns_works():
+                log.info("prepared /run/netns via %s", label)
+                return
+
+        # Not fatal on purpose: the API stays up so the failure is visible in the UI.
+        log.error(
+            "cannot create network namespaces: /run/netns could not be made a shared "
+            "mountpoint. The core container needs cap_add NET_ADMIN and SYS_ADMIN."
+        )
 
     # ------------------------------------------------------------ reconcile
 
