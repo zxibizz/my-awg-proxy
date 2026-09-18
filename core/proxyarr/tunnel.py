@@ -188,6 +188,13 @@ class Tunnel:
         self.procs.clear()
 
         sh.quiet("ip", "netns", "del", self.netns)
+        # ip-netns cannot unlink a handle whose bind mount was already invalidated.
+        netns_path = Path("/run/netns") / self.netns
+        if netns_path.exists() or netns_path.is_symlink():
+            try:
+                netns_path.unlink()
+            except OSError as exc:
+                log.warning("[%s] could not remove namespace handle: %s", self.name, exc)
         sh.quiet("ip", "link", "del", self.host_if)
         shutil.rmtree(self.netns_etc, ignore_errors=True)
         self.wg_conf_path.unlink(missing_ok=True)

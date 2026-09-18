@@ -69,6 +69,9 @@ class Manager:
             if _NETNS_RE.match(name):
                 log.warning("removing stale netns %s", name)
                 sh.quiet("ip", "netns", "del", name)
+                netns_path = Path("/run/netns") / name
+                if netns_path.exists() or netns_path.is_symlink():
+                    netns_path.unlink(missing_ok=True)
 
         route = sh.run("ip", "-4", "route", "show", "default", check=False)
         parts = route.stdout.split()
@@ -217,7 +220,11 @@ class Manager:
                 if time.time() - tunnel.started_at < _HANDSHAKE_GRACE:
                     continue
                 age = tunnel.wg_stats()["handshake_age"]
-                if age is None or age > self.settings.handshake_timeout:
+                if age is None:
+                    # A healthy probe proves the tunnel is carrying traffic;
+                    # missing stats are transient and must not trigger teardown.
+                    continue
+                if age > self.settings.handshake_timeout:
                     log.warning("[%s] no handshake for %ss, rebuilding tunnel", name, age)
                     self.restart(name)
 
