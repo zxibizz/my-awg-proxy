@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>proxyarr</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161a; --panel: #1c1f26; --line: #2c313b;
+    --fg: #e6e8ec; --muted: #8b93a3;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #4493f8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.5rem; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1160px; margin: 0 auto; }
+  h1 { font-size: 1.25rem; margin: 0; letter-spacing: .02em; }
+  h2 { font-size: .95rem; margin: 0 0 .75rem; color: var(--muted); font-weight: 600; }
+  header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+  header .spacer { flex: 1; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 1.1rem; margin-bottom: 1.25rem;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.actions { text-align: right; white-space: nowrap; }
+  .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; font-weight: 600; }
+  .badge.up { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.down { background: rgba(248,81,73,.15); color: var(--bad); }
+  .badge.idle { background: rgba(210,153,34,.15); color: var(--warn); }
+  .badge.off { background: rgba(139,147,163,.15); color: var(--muted); }
+  .muted { color: var(--muted); }
+  .small { font-size: .8rem; }
+  .nowrap { white-space: nowrap; }
+  button, select, input, textarea {
+    font: inherit; color: var(--fg); background: #232730;
+    border: 1px solid var(--line); border-radius: 6px; padding: .35rem .6rem;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b0d10; font-weight: 600; }
+  input[type=number] { width: 4.5rem; }
+  textarea { width: 100%; min-height: 9rem; resize: vertical; }
+  .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-bottom: .75rem; }
+  label.field { display: flex; flex-direction: column; gap: .25rem; font-size: .8rem; color: var(--muted); }
+  #toast {
+    position: fixed; right: 1rem; bottom: 1rem; max-width: 28rem;
+    padding: .7rem .9rem; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); display: none; white-space: pre-wrap;
+  }
+  #toast.err { border-color: var(--bad); color: var(--bad); }
+  #toast.ok { border-color: var(--ok); color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>proxyarr</h1>
+    <span class="muted small mono" id="listen"></span>
+    <span class="spacer"></span>
+    <label class="field">
+      <span>traffic policy</span>
+      <select id="balance">
+        <option value="failover">failover (priority order)</option>
+        <option value="roundrobin">load balance &mdash; roundrobin</option>
+        <option value="leastconn">load balance &mdash; leastconn</option>
+      </select>
+    </label>
+  </header>
+
+  <section>
+    <h2>Tunnels</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>State</th><th>Pool</th><th>Probe</th>
+          <th>Endpoint</th><th>Handshake</th><th>Transfer</th><th>Prio</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="tunnels"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Probe</h2>
+    <form id="probe">
+      <div class="row">
+        <input id="probe-urls" class="mono" spellcheck="false" autocomplete="off"
+          style="flex:1;min-width:22rem" placeholder="https://example.org/health">
+        <button class="primary" type="submit">Save</button>
+      </div>
+      <span class="muted small">Space or comma separated. A tunnel is failed over as soon as its probe stops returning 200.</span>
+    </form>
+  </section>
+
+  <section>
+    <h2>Add tunnel</h2>
+    <form id="add">
+      <div class="row">
+        <label class="field">
+          <span>name (blank = filename)</span>
+          <input id="name" name="name" placeholder="NL" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>upload .conf</span>
+          <input id="file" name="file" type="file" accept=".conf,text/plain">
+        </label>
+      </div>
+      <textarea id="config" name="config" spellcheck="false" class="mono"
+        placeholder="&#91;Interface&#93;&#10;PrivateKey = ...&#10;Address = 10.0.0.2/32&#10;DNS = 10.0.0.1&#10;&#10;&#91;Peer&#93;&#10;PublicKey = ...&#10;Endpoint = vpn.example.net:51820&#10;AllowedIPs = 0.0.0.0/0"></textarea>
+      <div class="row" style="margin-top:.75rem">
+        <button class="primary" type="submit">Add</button>
+        <span class="muted small">PostUp/PreUp hooks are rejected &mdash; tunnels never run commands from a config.</span>
+      </div>
+    </form>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let busy = false;
+
+function toast(message, kind) {
+  const node = $("toast");
+  node.textContent = message;
+  node.className = kind;
+  node.style.display = "block";
+  clearTimeout(node._timer);
+  node._timer = setTimeout(() => { node.style.display = "none"; }, 6000);
+}
+
+async function api(method, path, options = {}) {
+  const init = { method, headers: {} };
+  if (options.json !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(options.json);
+  } else if (options.form !== undefined) {
+    init.body = options.form;
+  }
+  const response = await fetch(path, init);
+  if (response.status === 204) return null;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || response.statusText);
+  return payload;
+}
+
+function bytes(value) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = Number(value) || 0, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
+}
+
+function duration(seconds) {
+  if (seconds === null || seconds === undefined) return "\u2014";
+  const s = Math.round(seconds);
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+
+function badge(text, kind) {
+  const span = document.createElement("span");
+  span.className = "badge " + kind;
+  span.textContent = text;
+  return span;
+}
+
+function cell(row, content) {
+  const td = document.createElement("td");
+  if (content instanceof Node) td.appendChild(content);
+  else td.textContent = content === null || content === undefined ? "\u2014" : String(content);
+  row.appendChild(td);
+  return td;
+}
+
+function stateBadge(tunnel) {
+  if (!tunnel.enabled) return badge("disabled", "off");
+  if (tunnel.state === "up") return badge("up", "up");
+  if (tunnel.state === "failed") return badge("failed", "down");
+  return badge(tunnel.state, "idle");
+}
+
+function poolBadge(tunnel) {
+  const hap = tunnel.haproxy;
+  if (!hap) return badge("absent", "off");
+  const status = hap.status || "?";
+  const kind = status.startsWith("UP") ? "up" : status.startsWith("DOWN") ? "down" : "idle";
+  return badge(status + (hap.backup ? " (backup)" : ""), kind);
+}
+
+function render(data) {
+  $("listen").textContent = "socks5 on 127.0.0.1:" + data.socks_port +
+    (data.haproxy_running ? "" : "  \u2022  haproxy down");
+  if (document.activeElement !== $("balance")) $("balance").value = data.balance;
+  if (document.activeElement !== $("probe-urls")) $("probe-urls").value = data.probe_urls || "";
+
+  const body = $("tunnels");
+  body.textContent = "";
+  if (!data.tunnels.length) {
+    const row = body.insertRow();
+    const td = cell(row, "No tunnels yet \u2014 add one below.");
+    td.colSpan = 9;
+    td.className = "muted";
+    return;
+  }
+
+  for (const tunnel of data.tunnels) {
+    const row = body.insertRow();
+    const name = document.createElement("span");
+    name.className = "mono";
+    name.textContent = tunnel.name;
+    cell(row, name);
+    cell(row, stateBadge(tunnel)).title = tunnel.error || "";
+    cell(row, poolBadge(tunnel));
+
+    const probe = document.createElement("span");
+    probe.className = "small muted";
+    probe.textContent = tunnel.probe || (tunnel.error ? tunnel.error : "\u2014");
+    probe.title = probe.textContent;
+    cell(row, probe);
+
+    const endpoint = document.createElement("span");
+    endpoint.className = "mono small";
+    endpoint.textContent = tunnel.endpoint;
+    cell(row, endpoint);
+
+    cell(row, tunnel.state === "up" ? duration(tunnel.handshake_age) + " ago" : "\u2014");
+
+    const transfer = document.createElement("span");
+    transfer.className = "nowrap small";
+    transfer.textContent = bytes(tunnel.rx_bytes) + " \u2193 / " + bytes(tunnel.tx_bytes) + " \u2191";
+    cell(row, transfer);
+
+    const prio = document.createElement("input");
+    prio.type = "number";
+    prio.min = "0";
+    prio.max = "9999";
+    prio.value = tunnel.priority;
+    prio.onchange = () => act(() =>
+      api("PATCH", "/api/tunnels/" + encodeURIComponent(tunnel.name),
+          { json: { priority: Number(prio.value) } }));
+    cell(row, prio);
+
+    const actions = cell(row, "");
+    actions.className = "actions";
+    actions.textContent = "";
+    actions.appendChild(button(tunnel.enabled ? "Disable" : "Enable", "", () =>
+      api("PATCH", "/api/tunnels/" + encodeURIComponent(tunnel.name),
+          { json: { enabled: !tunnel.enabled } })));
+    actions.appendChild(button("Restart", "", () =>
+      api("POST", "/api/tunnels/" + encodeURIComponent(tunnel.name) + "/restart")));
+    actions.appendChild(button("Exit IP", "", async () => {
+      const result = await api("GET", "/api/tunnels/" + encodeURIComponent(tunnel.name) + "/exit-ip");
+      toast(tunnel.name + " exits from " + result.ip, "ok");
+    }));
+    actions.appendChild(button("Delete", "danger", () => {
+      if (!confirm("Delete tunnel " + tunnel.name + "?")) return Promise.resolve();
+      return api("DELETE", "/api/tunnels/" + encodeURIComponent(tunnel.name));
+    }));
+  }
+}
+
+function button(label, className, handler) {
+  const node = document.createElement("button");
+  node.textContent = label;
+  node.className = className;
+  node.style.marginLeft = ".35rem";
+  node.onclick = () => act(handler);
+  return node;
+}
+
+async function act(handler) {
+  if (busy) return;
+  busy = true;
+  try {
+    await handler();
+    await refresh();
+  } catch (error) {
+    toast(error.message, "err");
+  } finally {
+    busy = false;
+  }
+}
+
+async function refresh() {
+  try {
+    render(await api("GET", "/api/pool"));
+  } catch (error) {
+    toast(error.message, "err");
+  }
+}
+
+$("balance").onchange = (event) =>
+  act(() => api("PUT", "/api/pool", { json: { balance: event.target.value } }));
+
+$("probe").onsubmit = (event) => {
+  event.preventDefault();
+  act(async () => {
+    await api("PUT", "/api/probe", { json: { urls: $("probe-urls").value } });
+    toast("Probe URLs updated", "ok");
+  });
+};
+
+$("add").onsubmit = (event) => {
+  event.preventDefault();
+  const form = new FormData();
+  form.append("name", $("name").value);
+  form.append("config", $("config").value);
+  if ($("file").files.length) form.append("file", $("file").files[0]);
+  act(async () => {
+    await api("POST", "/api/tunnels", { form });
+    $("add").reset();
+    toast("Tunnel added", "ok");
+  });
+};
+
+refresh();
+setInterval(() => { if (!busy) refresh(); }, 5000);
+</script>
+</body>
+</html>

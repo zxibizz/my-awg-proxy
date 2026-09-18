@@ -1,2 +1,8 @@
 # WireGuard private keys and their generated env equivalents.
 wg_confs/
+
+# Local secrets for compose.
+.env
+
+# Peer configs and pool state (contains private keys).
+data/

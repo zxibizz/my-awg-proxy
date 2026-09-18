@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Health endpoint reporting whether rutracker is usable from this netns.
+"""Health endpoint reporting whether the probe targets are usable from this netns.
 
-Runs inside a gluetun container's network namespace, so each replica probes its
-own VPN exit IP. Serves 200 while the target answers normally, 503 once it
+One instance runs inside each tunnel's network namespace, so it probes that
+tunnel's own exit IP. Serves 200 while the target answers normally, 503 once it
 starts throttling -- which is what haproxy fails over on.
 """
 
@@ -102,7 +102,7 @@ def probe() -> tuple[bool, str]:
 
 
 def probe_loop() -> None:
-    # Staggered per replica so three tunnels do not hammer the tracker in lockstep.
+    # Staggered per tunnel so the pool does not hammer the target in lockstep.
     time.sleep(START_DELAY)
     while True:
         healthy, reason = probe()

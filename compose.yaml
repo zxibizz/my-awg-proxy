@@ -1,113 +1,49 @@
-x-awg: &awg
-  build: ./awg
-  cap_add:
-    - NET_ADMIN
-  devices:
-    - /dev/net/tun:/dev/net/tun
-  sysctls:
-    # awg-quick's fwmark policy routing drops reply packets without this.
-    - net.ipv4.conf.all.src_valid_mark=1
-  restart: unless-stopped
-
-x-socks: &socks
-  image: serjs/go-socks5-proxy:latest
-  environment:
-    PROXY_PORT: 1080
-    # Defaults to true in this image and exits on boot without credentials.
-    REQUIRE_AUTH: "false"
-  restart: unless-stopped
-
-x-probe: &probe
-  image: python:3.12-alpine
-  command: ["python", "/probe.py"]
-  volumes:
-    - ./probe.py:/probe.py:ro
-  environment: &probe-env
-    # tracker.php is the endpoint that gets throttled, but it answers 403 without
-    # a session, so it only belongs here once PROBE_COOKIE is set.
-    PROBE_URLS: https://rutracker.org/forum/index.php
-    # all: one failing URL trips failover. any: every URL must fail.
-    PROBE_MODE: all
-    PROBE_INTERVAL: "60"
-    PROBE_BAD_STATUS: "403,429,503"
-    # Set once you have captured what a throttled response actually looks like.
-    PROBE_BAD_TEXT: ""
-    PROBE_COOKIE: ""
-  restart: unless-stopped
-
 services:
-  vpn1:
-    <<: *awg
-    container_name: wg-vpn1
+  core:
+    build: ./core
+    container_name: proxyarr-core
+    cap_add:
+      # NET_ADMIN configures the links; SYS_ADMIN is what lets the container
+      # create its own network namespaces (docker's seccomp profile only
+      # permits unshare/setns when it is present).
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      # Tunnel handshakes are forwarded from each netns out through eth0.
+      - net.ipv4.ip_forward=1
     volumes:
-      - ./wg_confs/NL.conf:/etc/amnezia/awg0.conf:ro
-
-  socks1:
-    <<: *socks
-    container_name: wg-socks1
-    network_mode: service:vpn1
-    depends_on: [vpn1]
-
-  probe1:
-    <<: *probe
-    container_name: wg-probe1
-    network_mode: service:vpn1
-    depends_on: [vpn1]
+      - ./data:/data
+      # Imported once, only while ./data/peers is still empty.
+      - ./wg_confs:/seed:ro
     environment:
-      <<: *probe-env
-      START_DELAY: "0"
-
-  vpn2:
-    <<: *awg
-    container_name: wg-vpn2
-    volumes:
-      - ./wg_confs/DE.conf:/etc/amnezia/awg0.conf:ro
-
-  socks2:
-    <<: *socks
-    container_name: wg-socks2
-    network_mode: service:vpn2
-    depends_on: [vpn2]
-
-  probe2:
-    <<: *probe
-    container_name: wg-probe2
-    network_mode: service:vpn2
-    depends_on: [vpn2]
-    environment:
-      <<: *probe-env
-      START_DELAY: "20"
-
-  vpn3:
-    <<: *awg
-    container_name: wg-vpn3
-    volumes:
-      - ./wg_confs/SE.conf:/etc/amnezia/awg0.conf:ro
-
-  socks3:
-    <<: *socks
-    container_name: wg-socks3
-    network_mode: service:vpn3
-    depends_on: [vpn3]
-
-  probe3:
-    <<: *probe
-    container_name: wg-probe3
-    network_mode: service:vpn3
-    depends_on: [vpn3]
-    environment:
-      <<: *probe-env
-      START_DELAY: "40"
-
-  haproxy:
-    image: haproxy:3.0-alpine
-    container_name: wg-haproxy
-    volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      PROXYARR_TOKEN: ${PROXYARR_TOKEN:?set PROXYARR_TOKEN in .env}
+      # tracker.php is the endpoint that gets throttled, but it answers 403 without
+      # a session, so it only belongs here once PROBE_COOKIE is set.
+      PROBE_URLS: https://google.com
+      # all: one failing URL trips failover. any: every URL must fail.
+      PROBE_MODE: all
+      PROBE_INTERVAL: "60"
+      PROBE_BAD_STATUS: "403,429,503"
+      # Set once you have captured what a throttled response actually looks like.
+      PROBE_BAD_TEXT: ""
+      PROBE_COOKIE: ""
     ports:
-      # Bound to loopback: the proxy has no auth by default.
+      # Bound to loopback: the proxy has no auth.
       - "127.0.0.1:1080:1080"
-    depends_on: [vpn1, vpn2, vpn3]
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    container_name: proxyarr-web
+    environment:
+      CORE_URL: http://core:8080
+      PROXYARR_TOKEN: ${PROXYARR_TOKEN:?set PROXYARR_TOKEN in .env}
+    ports:
+      # Bound to loopback: the console has no auth.
+      - "127.0.0.1:8088:8000"
+    depends_on: [core]
     restart: unless-stopped
 
 networks:
