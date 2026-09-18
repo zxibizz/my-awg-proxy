@@ -8,6 +8,11 @@ services:
       # permits unshare/setns when it is present).
       - NET_ADMIN
       - SYS_ADMIN
+    security_opt:
+      # docker-default denies mount outright, which blocks `ip netns add` even
+      # with SYS_ADMIN. Only bites on AppArmor hosts, so it is invisible on
+      # Docker Desktop and fails on Ubuntu.
+      - apparmor=unconfined
     devices:
       - /dev/net/tun:/dev/net/tun
     sysctls:
